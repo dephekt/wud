@@ -172,8 +172,17 @@ export async function runTriggerForContainer(req, res) {
 
     const containerToTrigger = storeContainer.getContainer(id);
     if (containerToTrigger) {
-        const triggerToRun = getTriggers()[`${triggerType}.${triggerName}`];
-        if (triggerToRun) {
+        const triggerId = `${triggerType}.${triggerName}`;
+        const triggerToRun = getTriggers()[triggerId];
+        if (
+            triggerToRun &&
+            !getAssociatedTriggerIds(containerToTrigger).has(triggerId)
+        ) {
+            res.status(403).json({
+                error: 'Forbidden',
+                message: `Trigger ${triggerId} is not associated with this container`,
+            });
+        } else if (triggerToRun) {
             try {
                 await triggerToRun.trigger(containerToTrigger);
                 log.info(

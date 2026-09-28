@@ -1,5 +1,10 @@
 import * as component from './component';
 import * as registry from '../registry';
+import * as storeContainer from '../store/container';
+import {
+    getAssociatedTriggerIds,
+    UPDATE_TRIGGER_TYPES,
+} from '../triggers/associatedTriggers';
 import { requireRole } from './rbac';
 import logger from '../log';
 const log = logger.child({ component: 'trigger' });
@@ -21,7 +26,7 @@ export function getTrigger(req, res) {
 export async function runTrigger(req, res) {
     const triggerType = req.params.type;
     const triggerName = req.params.name;
-    const containerToTrigger = req.body;
+    let containerToTrigger = req.body;
 
     const triggerToRun =
         registry.getState().trigger[`${triggerType}.${triggerName}`];
@@ -42,6 +47,30 @@ export async function runTrigger(req, res) {
             message: `Error when running trigger ${triggerType}.${triggerName} (container is undefined)`,
         });
         return;
+    }
+
+    // An update trigger acts on a real container, so it only runs on a stored
+    // one it is associated with; notification triggers can be tested with any payload.
+    if (UPDATE_TRIGGER_TYPES.includes(triggerType)) {
+        const triggerId = `${triggerType}.${triggerName}`;
+        const storedContainer = storeContainer.getContainer(
+            containerToTrigger.id,
+        );
+        if (!storedContainer) {
+            res.status(404).json({
+                error: 'Not found',
+                message: `Error when running trigger ${triggerId} (container not found)`,
+            });
+            return;
+        }
+        if (!getAssociatedTriggerIds(storedContainer).has(triggerId)) {
+            res.status(403).json({
+                error: 'Forbidden',
+                message: `Trigger ${triggerId} is not associated with container ${storedContainer.name}`,
+            });
+            return;
+        }
+        containerToTrigger = storedContainer;
     }
 
     try {

@@ -332,6 +332,65 @@ describe('API Container', () => {
         expect(res.body.message).toEqual('Trigger not found');
     });
 
+    test('should refuse a trigger the container is not associated with', async () => {
+        const mockTrigger = jest.fn().mockResolvedValue(true);
+        (storeContainer.getContainer as jest.Mock).mockReturnValue({
+            id: 'container1',
+            triggerInclude: 'docker.grow',
+        });
+        (registry.getState as jest.Mock).mockReturnValue({
+            trigger: {
+                'docker.grow': { trigger: jest.fn() },
+                'docker.other': { trigger: mockTrigger },
+            },
+        });
+
+        const res = await request(app).post(
+            '/container1/triggers/docker/other',
+        );
+        expect(res.status).toBe(403);
+        expect(mockTrigger).not.toHaveBeenCalled();
+    });
+
+    test('should refuse a trigger that is not included by default', async () => {
+        const mockTrigger = jest.fn().mockResolvedValue(true);
+        (storeContainer.getContainer as jest.Mock).mockReturnValue({
+            id: 'container1',
+        });
+        (registry.getState as jest.Mock).mockReturnValue({
+            trigger: {
+                'docker.grow': {
+                    configuration: { includebydefault: false },
+                    trigger: mockTrigger,
+                },
+            },
+        });
+
+        const res = await request(app).post('/container1/triggers/docker/grow');
+        expect(res.status).toBe(403);
+        expect(mockTrigger).not.toHaveBeenCalled();
+    });
+
+    test('should run a trigger the container opts into', async () => {
+        const mockTrigger = jest.fn().mockResolvedValue(true);
+        (storeContainer.getContainer as jest.Mock).mockReturnValue({
+            id: 'container1',
+            triggerInclude: 'docker.grow',
+        });
+        (registry.getState as jest.Mock).mockReturnValue({
+            trigger: {
+                'docker.grow': {
+                    configuration: { includebydefault: false },
+                    trigger: mockTrigger,
+                },
+            },
+        });
+
+        const res = await request(app).post('/container1/triggers/docker/grow');
+        expect(res.status).toBe(200);
+        expect(mockTrigger).toHaveBeenCalled();
+    });
+
     test('should return 404 if container not found when running trigger', async () => {
         (storeContainer.getContainer as jest.Mock).mockReturnValue(undefined);
 

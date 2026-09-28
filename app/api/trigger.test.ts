@@ -2,6 +2,19 @@ import express from 'express';
 import request from 'supertest';
 import * as trigger from './trigger';
 import * as registry from '../registry';
+import * as storeContainer from '../store/container';
+
+jest.mock('../store/container', () => ({
+    getContainer: jest.fn(),
+}));
+
+const dockerTrigger = {
+    type: 'docker',
+    name: 'grow',
+    configuration: { includebydefault: false },
+    maskConfiguration: () => ({}),
+    trigger: jest.fn().mockResolvedValue(true),
+};
 
 jest.mock('../registry', () => ({
     getState: jest.fn(() => ({
@@ -22,11 +35,18 @@ jest.mock('../registry', () => ({
     })),
 }));
 
+const stateWithDockerTrigger = () => ({
+    trigger: { 'docker.grow': dockerTrigger },
+});
+
+const defaultState = (registry.getState as jest.Mock).getMockImplementation();
+
 describe('API Trigger', () => {
     let app: express.Express;
 
     beforeEach(() => {
         jest.clearAllMocks();
+        (registry.getState as jest.Mock).mockImplementation(defaultState);
         app = express();
         app.use(express.json());
         app.get('/', trigger.getTriggers);
@@ -104,6 +124,54 @@ describe('API Trigger', () => {
             message:
                 'Error when running trigger mock.test (container is undefined)',
         });
+    });
+
+    test('should run an update trigger on the stored container it is associated with', async () => {
+        (registry.getState as jest.Mock).mockReturnValue(
+            stateWithDockerTrigger(),
+        );
+        const stored = {
+            id: 'c1',
+            name: 'grow-app-site',
+            triggerInclude: 'docker.grow',
+        };
+        (storeContainer.getContainer as jest.Mock).mockReturnValue(stored);
+
+        const res = await request(app)
+            .post('/docker/grow')
+            .send({ id: 'c1', image: { name: 'spoofed' } });
+
+        expect(res.status).toBe(200);
+        expect(dockerTrigger.trigger).toHaveBeenCalledWith(stored);
+    });
+
+    test('should refuse an update trigger on a container it is not associated with', async () => {
+        (registry.getState as jest.Mock).mockReturnValue(
+            stateWithDockerTrigger(),
+        );
+        (storeContainer.getContainer as jest.Mock).mockReturnValue({
+            id: 'c2',
+            name: 'keycloak',
+        });
+
+        const res = await request(app).post('/docker/grow').send({ id: 'c2' });
+
+        expect(res.status).toBe(403);
+        expect(dockerTrigger.trigger).not.toHaveBeenCalled();
+    });
+
+    test('should refuse an update trigger on a container WUD does not know', async () => {
+        (registry.getState as jest.Mock).mockReturnValue(
+            stateWithDockerTrigger(),
+        );
+        (storeContainer.getContainer as jest.Mock).mockReturnValue(undefined);
+
+        const res = await request(app)
+            .post('/docker/grow')
+            .send({ id: 'made-up' });
+
+        expect(res.status).toBe(404);
+        expect(dockerTrigger.trigger).not.toHaveBeenCalled();
     });
 
     test('should handle trigger run failure', async () => {
