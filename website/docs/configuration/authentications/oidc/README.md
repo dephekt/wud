@@ -119,6 +119,28 @@ WUD supports any compliant OpenID Connect Identity Provider. Step-by-step guides
     defaultValue="openid email profile">
     OpenID Connect scopes to request during authorization flow. Automatically appends `groups` when `ADMINGROUP`, `RWGROUP`, or `ROGROUP` is configured unless overridden.
   </ConfigOption>
+
+  <ConfigOption
+    name="WUD_AUTH_OIDC_{auth_name}_AUDIENCE"
+    required={false}
+    type="string">
+    Accept access tokens issued by this provider as API bearer tokens when their `aud` claim contains this value. Unset, the API only accepts `wud_` Personal API Tokens. See [API access with OAuth access tokens](#api-access-with-oauth-access-tokens)
+  </ConfigOption>
+
+  <ConfigOption
+    name="WUD_AUTH_OIDC_{auth_name}_ALLOWEDCLIENTS"
+    required={false}
+    type="string">
+    Comma-separated client IDs allowed to call the API with an access token (matched against the `azp` claim). Unset, any client whose token carries the audience is accepted
+  </ConfigOption>
+
+  <ConfigOption
+    name="WUD_AUTH_OIDC_{auth_name}_ALGORITHMS"
+    required={false}
+    type="string"
+    defaultValue="RS256,ES256,PS256">
+    Comma-separated JWS algorithms accepted for access token signatures
+  </ConfigOption>
 </ConfigList>
 
 :::tip[Automatic User Onboarding & Role Sync]
@@ -141,6 +163,54 @@ WUD's startup verification recognizes that your Identity Provider provides admin
 
 :::warning[WUD automatically attempts to determine its public address for redirect URLs. If this fails due to a complex reverse proxy setup, you can explicitly specify the base URL using the `WUD_PUBLIC_URL` environment variable.]
 :::
+
+### API access with OAuth access tokens
+
+Besides [Personal API Tokens](../README.md#managing-users--api-tokens), the API can accept access tokens issued by your identity provider, which suits service-to-service calls using the OAuth 2.0 client credentials grant: the caller holds a client secret with the IdP instead of a long-lived WUD token, and each token it sends expires within minutes.
+
+Set `WUD_AUTH_OIDC_{auth_name}_AUDIENCE` to enable it. WUD then validates any `Authorization: Bearer` value that is not a `wud_` token as a JWT access token ([RFC 9068](https://www.rfc-editor.org/rfc/rfc9068)), locally, against the signing keys published at the provider's `jwks_uri`:
+
+- the signature, with one of the `ALGORITHMS`;
+- `iss` matches the discovered issuer;
+- `aud` contains `AUDIENCE`;
+- `exp` has not passed, and `sub` is present;
+- `azp` is in `ALLOWEDCLIENTS`, when set.
+
+The caller becomes a WUD user exactly as on login: its username comes from `USERNAMECLAIM` (falling back to `email`, then `preferred_username`), and its role from the groups claim. What it may do is further limited by the token's `scope` claim, like a Personal API Token:
+
+| Token scope | WUD API scopes |
+| ----------- | -------------- |
+| `wud:write` | read and write |
+| `wud:read`  | read           |
+| neither     | none           |
+
+A caller authenticated this way cannot create Personal API Tokens.
+
+:::info[The JWT header `typ` is not checked]
+RFC 9068 access tokens carry `typ: at+jwt`, but several providers (Keycloak among them) issue `typ: JWT`. Audience, issuer and signature are what bind the token to WUD.
+:::
+
+#### Example: a Keycloak service account
+
+1. Create a client scope named `wud:write`, and add an **Audience** mapper to it with **Included Custom Audience** set to your `AUDIENCE` value (for example `https://wud.example.com`) and **Add to access token** on.
+2. Create a confidential client (for example `my-automation`) with **Service accounts roles** enabled and every other flow disabled, then add `wud:write` to it as a **Default** client scope.
+3. Add the client's service-account user to the group mapped to `RWGROUP`, and make sure your groups mapper adds groups to the access token.
+4. Configure WUD:
+
+```yaml
+environment:
+  - WUD_AUTH_OIDC_KEYCLOAK_AUDIENCE=https://wud.example.com
+  - WUD_AUTH_OIDC_KEYCLOAK_ALLOWEDCLIENTS=my-automation
+```
+
+The client then fetches a token and calls the API:
+
+```bash
+TOKEN=$(curl -s -d grant_type=client_credentials \
+  -u "my-automation:$CLIENT_SECRET" \
+  https://keycloak.example.com/realms/myrealm/protocol/openid-connect/token | jq -r .access_token)
+curl -H "Authorization: Bearer $TOKEN" https://wud.example.com/api/containers
+```
 
 ### How to integrate with [Authelia](https://www.authelia.com)
 

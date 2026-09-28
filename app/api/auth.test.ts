@@ -212,6 +212,132 @@ describe('API Auth', () => {
         expect(next).toHaveBeenCalled();
     });
 
+    describe('requireAuthentication with a bearer token', () => {
+        const bearer = (token: string) =>
+            ({
+                isAuthenticated: () => false,
+                headers: { authorization: `Bearer ${token}` },
+            }) as any;
+        const response = () => {
+            const res: any = {};
+            res.set = jest.fn().mockReturnValue(res);
+            res.status = jest.fn().mockReturnValue(res);
+            res.json = jest.fn().mockReturnValue(res);
+            return res;
+        };
+        const accessTokenAuth = (verifyAccessToken: jest.Mock) => ({
+            getId: () => 'oidc.keycloak',
+            acceptsAccessTokens: () => true,
+            verifyAccessToken,
+        });
+        const withAuthentications = (authentication: object) =>
+            (registry.getState as jest.Mock).mockReturnValue({
+                authentication,
+            });
+
+        test('should send wud_ tokens to the API token strategy', () => {
+            const verifyAccessToken = jest.fn();
+            withAuthentications({ oidc: accessTokenAuth(verifyAccessToken) });
+            const passport = require('passport');
+            const next = jest.fn();
+
+            auth.requireAuthentication(bearer('wud_abc'), response(), next);
+
+            expect(passport.authenticate).toHaveBeenCalledWith('bearer', {
+                session: false,
+            });
+            expect(verifyAccessToken).not.toHaveBeenCalled();
+            expect(next).toHaveBeenCalled();
+        });
+
+        test('should keep the API token strategy when no authentication accepts access tokens', () => {
+            withAuthentications({
+                basic: { acceptsAccessTokens: () => false },
+            });
+            const passport = require('passport');
+
+            auth.requireAuthentication(
+                bearer('eyJ.jwt'),
+                response(),
+                jest.fn(),
+            );
+
+            expect(passport.authenticate).toHaveBeenCalledWith('bearer', {
+                session: false,
+            });
+        });
+
+        test('should authenticate a valid access token', async () => {
+            const user = {
+                username: 'svc',
+                role: 'rw',
+                token: { scopes: ['read', 'write'] },
+            };
+            withAuthentications({
+                basic: { acceptsAccessTokens: () => false },
+                oidc: accessTokenAuth(jest.fn().mockResolvedValue(user)),
+            });
+            const req = bearer('eyJ.jwt');
+            const next = jest.fn();
+
+            await auth.requireAuthentication(req, response(), next);
+
+            expect(req.user).toBe(user);
+            expect(next).toHaveBeenCalledWith();
+        });
+
+        test('should try each authentication that accepts access tokens', async () => {
+            const second = jest.fn().mockResolvedValue({ username: 'svc' });
+            withAuthentications({
+                first: accessTokenAuth(jest.fn().mockResolvedValue(undefined)),
+                second: accessTokenAuth(second),
+            });
+            const next = jest.fn();
+
+            await auth.requireAuthentication(
+                bearer('eyJ.jwt'),
+                response(),
+                next,
+            );
+
+            expect(second).toHaveBeenCalledWith('eyJ.jwt');
+            expect(next).toHaveBeenCalledWith();
+        });
+
+        test('should reject an invalid access token with 401', async () => {
+            withAuthentications({
+                oidc: accessTokenAuth(jest.fn().mockResolvedValue(undefined)),
+            });
+            const res = response();
+            const next = jest.fn();
+
+            await auth.requireAuthentication(bearer('eyJ.jwt'), res, next);
+
+            expect(res.set).toHaveBeenCalledWith(
+                'WWW-Authenticate',
+                'Bearer error="invalid_token"',
+            );
+            expect(res.status).toHaveBeenCalledWith(401);
+            expect(next).not.toHaveBeenCalled();
+        });
+
+        test('should pass verification errors to the error handler', async () => {
+            const error = new Error('store unavailable');
+            withAuthentications({
+                oidc: accessTokenAuth(jest.fn().mockRejectedValue(error)),
+            });
+            const next = jest.fn();
+
+            await auth.requireAuthentication(
+                bearer('eyJ.jwt'),
+                response(),
+                next,
+            );
+
+            expect(next).toHaveBeenCalledWith(error);
+        });
+    });
+
     test('getAllIds should return registered strategy ids', () => {
         const ids = auth.getAllIds();
         expect(ids).toContain('mockAuth');

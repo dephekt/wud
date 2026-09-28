@@ -1,52 +1,30 @@
 // @ts-nocheck
-import * as client from 'openid-client';
 import OidcStrategy from './OidcStrategy';
-import log from '../../../log';
-
-// Mock the openid-client module
-jest.mock('openid-client');
-
-const mockClient = {
-    client_id: '123456789',
-};
-
-const mockConfig = {
-    serverMetadata: jest.fn().mockReturnValue({
-        supportsPKCE: jest.fn().mockReturnValue(true),
-    }),
-};
 
 let oidcStrategy: any;
 
 beforeEach(async () => {
-    jest.resetAllMocks();
-    oidcStrategy = new OidcStrategy(
-        { config: mockConfig, client: mockClient },
-        () => {},
-        log,
-    );
+    oidcStrategy = new OidcStrategy();
     oidcStrategy.success = jest.fn();
     oidcStrategy.fail = jest.fn();
 });
 
 test('authenticate should return user from session if so', async () => {
-    oidcStrategy.authenticate({ isAuthenticated: () => true });
-    expect(oidcStrategy.success).toHaveBeenCalled();
+    const user = { username: 'session-user' };
+    oidcStrategy.authenticate({ isAuthenticated: () => true, user });
+    expect(oidcStrategy.success).toHaveBeenCalledWith(user);
 });
 
-test('authenticate should call super.authenticate when no existing session', async () => {
-    const fail = jest.spyOn(oidcStrategy, 'fail');
+test('authenticate should fail when there is no session', async () => {
     oidcStrategy.authenticate({ isAuthenticated: () => false, headers: {} });
-    expect(fail).toHaveBeenCalled();
+    expect(oidcStrategy.fail).toHaveBeenCalledWith(401);
 });
 
-test('authenticate should get & validate Bearer token', async () => {
-    const verify = jest.spyOn(oidcStrategy, 'verify');
+test('authenticate should not accept a bearer token', async () => {
     oidcStrategy.authenticate({
         isAuthenticated: () => false,
-        headers: {
-            authorization: 'Bearer XXXXX',
-        },
+        headers: { authorization: 'Bearer XXXXX' },
     });
-    expect(verify).toHaveBeenCalledWith('XXXXX', expect.any(Function));
+    expect(oidcStrategy.success).not.toHaveBeenCalled();
+    expect(oidcStrategy.fail).toHaveBeenCalledWith(401);
 });

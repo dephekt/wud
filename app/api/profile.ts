@@ -113,6 +113,13 @@ export function init() {
             const user = (req as any).user;
             const { name, scopes, expiresAt } = req.body;
 
+            // A bearer token must not be able to mint a longer-lived one
+            if (user.token) {
+                return res.status(403).json({
+                    error: 'API tokens can only be created from a login session',
+                });
+            }
+
             if (!name) {
                 return res
                     .status(400)

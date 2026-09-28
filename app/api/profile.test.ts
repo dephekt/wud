@@ -139,6 +139,28 @@ describe('Profile API Router', () => {
         );
     });
 
+    test('POST /profile/tokens should refuse a caller authenticated by a bearer token', async () => {
+        const bearerApp = express();
+        bearerApp.use(express.json());
+        bearerApp.use((req: any, _res, next) => {
+            req.user = {
+                id: 'svc1',
+                username: 'service-account',
+                role: 'rw',
+                token: { id: 'oidc:jti', scopes: ['read', 'write'] },
+            };
+            next();
+        });
+        bearerApp.use('/profile', profileRouter.init());
+
+        const res = await request(bearerApp)
+            .post('/profile/tokens')
+            .send({ name: 'minted', scopes: ['read', 'write'] });
+
+        expect(res.status).toBe(403);
+        expect(tokenStore.createToken).not.toHaveBeenCalled();
+    });
+
     test('DELETE /profile/tokens/:id should delete token', async () => {
         const res = await request(app).delete('/profile/tokens/t1');
         expect(res.status).toBe(204);

@@ -786,3 +786,7 @@ components:
             type: http
             scheme: basic
             description: HTTP Basic Authentication (when WUD_AUTH_BASIC is enabled)
+        bearerAuth:
+            type: http
+            scheme: bearer
+            description: A `wud_` Personal API Token, or an OIDC access token when WUD_AUTH_OIDC_{name}_AUDIENCE is set

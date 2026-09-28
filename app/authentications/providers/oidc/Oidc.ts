@@ -1,4 +1,5 @@
 import * as client from 'openid-client';
+import { createRemoteJWKSet, jwtVerify, JWTPayload } from 'jose';
 import Authentication from '../Authentication';
 import OidcStrategy from './OidcStrategy';
 import { getPublicUrl } from '../../../configuration';
@@ -9,6 +10,24 @@ import {
     updateUser,
     UserRole,
 } from '../../../store/user';
+import { ApiToken, ApiTokenScope } from '../../../store/token';
+
+const DEFAULT_ACCESS_TOKEN_ALGORITHMS = ['RS256', 'ES256', 'PS256'];
+
+const splitList = (value?: string) =>
+    (value ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+export interface OidcUser {
+    id: string;
+    username: string;
+    role: UserRole;
+    provider: string;
+    preferences?: unknown;
+    token?: ApiToken;
+}
 
 // Extend express-session to store OIDC data in session
 declare module 'express-session' {
@@ -43,6 +62,9 @@ class Oidc extends Authentication {
             defaultrole: this.joi.string().valid('ro', 'none').default('ro'),
             groupsclaim: this.joi.string().default('groups'),
             scope: this.joi.string().optional(),
+            audience: this.joi.string().optional(),
+            allowedclients: this.joi.string().optional(),
+            algorithms: this.joi.string().optional(),
         });
     }
 
@@ -61,6 +83,8 @@ class Oidc extends Authentication {
     private discoveryCachedAt: number | undefined;
     private logoutUrl: string | undefined;
     private discoveryPromise: Promise<void> | undefined;
+    private jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
+    private jwksUri: string | undefined;
 
     private async discoverConfiguration() {
         this.log.debug(
@@ -208,16 +232,7 @@ class Oidc extends Authentication {
                 res.status(500).send(e.message);
             }
         });
-        const strategy = new OidcStrategy(
-            {
-                config: this.cachedConfig,
-                params: {
-                    scope: this.getEffectiveScope(this.cachedConfig),
-                },
-            },
-            async (accessToken, done) => this.verify(accessToken, done),
-            this.log,
-        );
+        const strategy = new OidcStrategy();
         strategy.name = 'oidc';
         return strategy;
     }
@@ -335,19 +350,112 @@ class Oidc extends Authentication {
         }
     }
 
-    async verify(
+    /**
+     * Whether this provider accepts OAuth access tokens as API bearer tokens.
+     */
+    acceptsAccessTokens() {
+        return Boolean(this.configuration.audience);
+    }
+
+    /**
+     * Validate an OAuth access token issued for this API (RFC 9068) and
+     * resolve its user. The token is checked locally against the issuer's
+     * signing keys; returns undefined when it is not acceptable.
+     */
+    async verifyAccessToken(
         accessToken: string,
-        done: (err: Error | null, user?: { username: string } | false) => void,
-    ) {
-        try {
-            const user = await this.getUserFromAccessToken(accessToken);
-            done(null, user);
-        } catch (e) {
-            this.log.warn(
-                `Error when validating the user access token (${(e as Error).message})`,
-            );
-            done(null, false);
+    ): Promise<OidcUser | undefined> {
+        if (!this.acceptsAccessTokens()) {
+            return undefined;
         }
+        const config = await this.ensureDiscovered(false);
+        const metadata = config?.serverMetadata();
+        if (!metadata?.jwks_uri) {
+            this.log.warn(
+                'Unable to validate access token: the issuer publishes no jwks_uri',
+            );
+            return undefined;
+        }
+        if (this.jwksUri !== metadata.jwks_uri || !this.jwks) {
+            this.jwks = createRemoteJWKSet(new URL(metadata.jwks_uri), {
+                timeoutDuration: this.configuration.timeout,
+            });
+            this.jwksUri = metadata.jwks_uri;
+        }
+
+        let payload: JWTPayload;
+        try {
+            ({ payload } = await jwtVerify(accessToken, this.jwks, {
+                issuer: metadata.issuer,
+                audience: this.configuration.audience,
+                algorithms:
+                    splitList(this.configuration.algorithms).length > 0
+                        ? splitList(this.configuration.algorithms)
+                        : DEFAULT_ACCESS_TOKEN_ALGORITHMS,
+                requiredClaims: ['exp', 'sub'],
+            }));
+        } catch (e) {
+            this.log.debug(`Access token rejected (${(e as Error).message})`);
+            return undefined;
+        }
+
+        const allowedClients = splitList(this.configuration.allowedclients);
+        const clientId = typeof payload.azp === 'string' ? payload.azp : '';
+        if (allowedClients.length > 0 && !allowedClients.includes(clientId)) {
+            this.log.warn(
+                `Access token rejected: client '${clientId}' is not allowed`,
+            );
+            return undefined;
+        }
+
+        const username = this.getUsernameFromClaims(payload);
+        if (!username) {
+            this.log.warn(
+                'Access token rejected: it carries no username claim',
+            );
+            return undefined;
+        }
+
+        let user: OidcUser;
+        try {
+            user = await this.resolveUser(username, payload);
+        } catch {
+            return undefined;
+        }
+        return {
+            ...user,
+            token: {
+                id: `oidc:${payload.jti ?? payload.sub}`,
+                userId: user.id,
+                name: clientId || this.name,
+                scopes: Oidc.getScopesFromClaim(payload.scope),
+            },
+        };
+    }
+
+    /**
+     * Map the OAuth scope claim onto WUD API token scopes.
+     */
+    static getScopesFromClaim(scopeClaim: unknown): ApiTokenScope[] {
+        const scopes =
+            typeof scopeClaim === 'string' ? scopeClaim.split(' ') : [];
+        if (scopes.includes('wud:write')) {
+            return ['read', 'write'];
+        }
+        if (scopes.includes('wud:read')) {
+            return ['read'];
+        }
+        return [];
+    }
+
+    private getUsernameFromClaims(
+        claims: Record<string, unknown>,
+    ): string | undefined {
+        const username =
+            claims[this.configuration.usernameclaim] ??
+            claims.email ??
+            claims.preferred_username;
+        return username ? String(username) : undefined;
     }
 
     async getUserFromAccessToken(accessToken: string, claim?: client.IDToken) {
@@ -358,21 +466,31 @@ class Oidc extends Authentication {
             claim?.sub ?? client.skipSubjectCheck,
         );
 
-        // check the usernameclaim, if it doesn't exist, try to use the email and log a warning
+        // check the usernameclaim, if it doesn't exist, fall back to email then preferred_username
         let username = userInfo[this.configuration.usernameclaim]?.toString();
         if (!username) {
             this.log.warn(
                 `The claim [${this.configuration.usernameclaim}] does not exist in the user info, using email instead`,
             );
-            username = userInfo.email?.toString();
+            username = this.getUsernameFromClaims(userInfo);
         }
 
-        const validUsername = username || 'unknown';
+        return this.resolveUser(username || 'unknown', userInfo, claim);
+    }
 
+    /**
+     * Resolve the WUD user for an identity: role from its groups, then
+     * onboard or sync the stored user.
+     */
+    private async resolveUser(
+        validUsername: string,
+        claims: Record<string, unknown>,
+        fallbackClaims?: Record<string, unknown>,
+    ): Promise<OidcUser> {
         // Extract groups claim
         const groupsClaimKey = this.configuration.groupsclaim || 'groups';
         const rawGroups =
-            userInfo[groupsClaimKey] || (claim as any)?.[groupsClaimKey];
+            claims[groupsClaimKey] || fallbackClaims?.[groupsClaimKey];
         let userGroups: string[] = [];
         if (Array.isArray(rawGroups)) {
             userGroups = rawGroups.map(String);

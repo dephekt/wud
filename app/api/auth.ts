@@ -38,6 +38,21 @@ export function requireAuthentication(req, res, next): any {
     }
     const authHeader = req.headers?.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.slice('Bearer '.length).trim();
+        const accessTokenAuthentications = token.startsWith('wud_')
+            ? []
+            : Object.values(registry.getState().authentication).filter(
+                  (authentication) => authentication.acceptsAccessTokens(),
+              );
+        if (accessTokenAuthentications.length > 0) {
+            return authenticateAccessToken(
+                token,
+                accessTokenAuthentications,
+                req,
+                res,
+                next,
+            );
+        }
         return passport.authenticate('bearer', { session: false })(
             req,
             res,
@@ -49,6 +64,32 @@ export function requireAuthentication(req, res, next): any {
         res,
         next,
     );
+}
+
+/**
+ * Authenticate an OAuth access token against the authentications that
+ * accept them (OIDC with an audience configured).
+ */
+async function authenticateAccessToken(
+    token: string,
+    authentications: Authentication[],
+    req,
+    res,
+    next,
+) {
+    try {
+        for (const authentication of authentications) {
+            const user = await authentication.verifyAccessToken(token);
+            if (user) {
+                req.user = user;
+                return next();
+            }
+        }
+    } catch (e) {
+        return next(e);
+    }
+    res.set('WWW-Authenticate', 'Bearer error="invalid_token"');
+    return res.status(401).json({ error: 'Unauthorized' });
 }
 
 /**

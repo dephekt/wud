@@ -52,6 +52,8 @@ All users can also navigate to **My Profile** to:
 - Change their account password (for local accounts).
 - Generate and manage **Personal API Tokens** for automation scripts, CI/CD pipelines, or Home Assistant integrations using `Authorization: Bearer wud_...`.
 
+With OIDC, the API can also accept access tokens from your identity provider; see [API access with OAuth access tokens](oidc/README.md#api-access-with-oauth-access-tokens).
+
 ---
 
 ## Authentication Strategies

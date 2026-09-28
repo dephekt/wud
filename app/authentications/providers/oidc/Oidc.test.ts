@@ -1,11 +1,17 @@
 import { ValidationError } from 'joi';
 import express from 'express';
 import * as client from 'openid-client';
+import * as jose from 'jose';
 import Oidc from './Oidc';
 import * as userStore from '../../../store/user';
 
 // Mock the openid-client module
 jest.mock('openid-client');
+
+jest.mock('jose', () => ({
+    createRemoteJWKSet: jest.fn(),
+    jwtVerify: jest.fn(),
+}));
 
 jest.mock('../../../store/user', () => ({
     getUserByUsername: jest.fn(),
@@ -173,30 +179,195 @@ test('getUserFromAccessToken should keep discovery cache when ttl is unlimited',
     );
 });
 
-test('verify should return user on valid token', async () => {
-    oidc.configuration = { ...configurationValid, ttl: -1 };
-    (oidc as any).cachedConfig = mockConfig;
-    const mockUserInfo = { email: 'test@example.com' };
-    (client.fetchUserInfo as jest.Mock).mockResolvedValue(mockUserInfo);
+const accessTokenConfiguration = {
+    ...configurationValid,
+    ttl: -1,
+    audience: 'https://wud.example.com',
+    rwgroup: '/wud-rw',
+    defaultrole: 'none',
+};
 
-    const done = jest.fn();
-    await oidc.verify('valid-token', done);
+const issuerMetadata = {
+    issuer: 'https://idp/realms/home',
+    jwks_uri: 'https://idp/realms/home/certs',
+};
 
-    expect(done).toHaveBeenCalledWith(
-        null,
-        expect.objectContaining({ username: 'test@example.com' }),
+function setUpAccessTokens(configuration = {}) {
+    oidc.configuration = { ...accessTokenConfiguration, ...configuration };
+    (oidc as any).cachedConfig = {
+        serverMetadata: jest.fn().mockReturnValue(issuerMetadata),
+    };
+    (jose.createRemoteJWKSet as jest.Mock).mockReturnValue('jwks');
+}
+
+const servicePayload = {
+    sub: 'svc-sub',
+    jti: 'token-id',
+    azp: 'grow-app-wud',
+    preferred_username: 'service-account-grow-app-wud',
+    groups: ['/wud-rw'],
+    scope: 'profile wud:write',
+};
+
+test('validateConfiguration should accept access token options', async () => {
+    const configuration = {
+        ...configurationValid,
+        audience: 'https://wud.example.com',
+        allowedclients: 'grow-app-wud',
+        algorithms: 'RS256',
+    };
+    expect(oidc.validateConfiguration(configuration)).toStrictEqual(
+        configuration,
     );
 });
 
-test('verify should return false on invalid token', async () => {
-    (client.fetchUserInfo as jest.Mock).mockRejectedValue(
-        new Error('Invalid token'),
-    );
-    oidc.log = { warn: jest.fn(), info: jest.fn(), debug: jest.fn() };
+test('acceptsAccessTokens should require an audience', async () => {
+    expect(oidc.acceptsAccessTokens()).toBe(false);
+    oidc.configuration = accessTokenConfiguration;
+    expect(oidc.acceptsAccessTokens()).toBe(true);
+});
 
-    const done = jest.fn();
-    await oidc.verify('invalid-token', done);
-    expect(done).toHaveBeenCalledWith(null, false);
+test('verifyAccessToken should not validate anything without an audience', async () => {
+    const user = await oidc.verifyAccessToken('token');
+    expect(user).toBeUndefined();
+    expect(jose.jwtVerify).not.toHaveBeenCalled();
+});
+
+test('verifyAccessToken should verify the token against the issuer keys', async () => {
+    setUpAccessTokens();
+    (jose.jwtVerify as jest.Mock).mockResolvedValue({
+        payload: servicePayload,
+    });
+
+    const user = await oidc.verifyAccessToken('token');
+
+    expect(jose.createRemoteJWKSet).toHaveBeenCalledWith(
+        new URL(issuerMetadata.jwks_uri),
+        { timeoutDuration: 5000 },
+    );
+    expect(jose.jwtVerify).toHaveBeenCalledWith('token', 'jwks', {
+        issuer: issuerMetadata.issuer,
+        audience: 'https://wud.example.com',
+        algorithms: ['RS256', 'ES256', 'PS256'],
+        requiredClaims: ['exp', 'sub'],
+    });
+    expect(client.fetchUserInfo).not.toHaveBeenCalled();
+    expect(user).toEqual(
+        expect.objectContaining({
+            username: 'service-account-grow-app-wud',
+            role: 'rw',
+            token: {
+                id: 'oidc:token-id',
+                userId: 'oidc-user-id',
+                name: 'grow-app-wud',
+                scopes: ['read', 'write'],
+            },
+        }),
+    );
+});
+
+test('verifyAccessToken should reuse the key set across calls', async () => {
+    setUpAccessTokens();
+    (jose.jwtVerify as jest.Mock).mockResolvedValue({
+        payload: servicePayload,
+    });
+
+    await oidc.verifyAccessToken('token');
+    await oidc.verifyAccessToken('token');
+
+    expect(jose.createRemoteJWKSet).toHaveBeenCalledTimes(1);
+});
+
+test('verifyAccessToken should use the configured algorithms', async () => {
+    setUpAccessTokens({ algorithms: 'ES256, EdDSA' });
+    (jose.jwtVerify as jest.Mock).mockResolvedValue({
+        payload: servicePayload,
+    });
+
+    await oidc.verifyAccessToken('token');
+
+    expect(jose.jwtVerify).toHaveBeenCalledWith(
+        'token',
+        'jwks',
+        expect.objectContaining({ algorithms: ['ES256', 'EdDSA'] }),
+    );
+});
+
+test('verifyAccessToken should reject a token that fails verification', async () => {
+    setUpAccessTokens();
+    (jose.jwtVerify as jest.Mock).mockRejectedValue(
+        new Error('unexpected "aud" claim value'),
+    );
+
+    expect(await oidc.verifyAccessToken('token')).toBeUndefined();
+    expect(userStore.createUser).not.toHaveBeenCalled();
+});
+
+test('verifyAccessToken should reject a client that is not allowed', async () => {
+    setUpAccessTokens({ allowedclients: 'other-client, another' });
+    (jose.jwtVerify as jest.Mock).mockResolvedValue({
+        payload: servicePayload,
+    });
+
+    expect(await oidc.verifyAccessToken('token')).toBeUndefined();
+});
+
+test('verifyAccessToken should accept an allowed client', async () => {
+    setUpAccessTokens({ allowedclients: 'other-client, grow-app-wud' });
+    (jose.jwtVerify as jest.Mock).mockResolvedValue({
+        payload: servicePayload,
+    });
+
+    expect(await oidc.verifyAccessToken('token')).toBeDefined();
+});
+
+test('verifyAccessToken should reject a user outside every authorized group', async () => {
+    setUpAccessTokens();
+    (jose.jwtVerify as jest.Mock).mockResolvedValue({
+        payload: { ...servicePayload, groups: ['/other'] },
+    });
+
+    expect(await oidc.verifyAccessToken('token')).toBeUndefined();
+});
+
+test('verifyAccessToken should reject a token without a username claim', async () => {
+    setUpAccessTokens();
+    (jose.jwtVerify as jest.Mock).mockResolvedValue({
+        payload: { ...servicePayload, preferred_username: undefined },
+    });
+
+    expect(await oidc.verifyAccessToken('token')).toBeUndefined();
+});
+
+test('verifyAccessToken should reject when the issuer publishes no keys', async () => {
+    setUpAccessTokens();
+    (oidc as any).cachedConfig.serverMetadata.mockReturnValue({
+        issuer: issuerMetadata.issuer,
+    });
+
+    expect(await oidc.verifyAccessToken('token')).toBeUndefined();
+    expect(jose.jwtVerify).not.toHaveBeenCalled();
+});
+
+test('getScopesFromClaim should map OAuth scopes to API token scopes', () => {
+    expect(Oidc.getScopesFromClaim('openid wud:write')).toEqual([
+        'read',
+        'write',
+    ]);
+    expect(Oidc.getScopesFromClaim('wud:read')).toEqual(['read']);
+    expect(Oidc.getScopesFromClaim('openid profile')).toEqual([]);
+    expect(Oidc.getScopesFromClaim(undefined)).toEqual([]);
+});
+
+test('getUserFromAccessToken should fall back to preferred_username', async () => {
+    oidc.configuration = { ...configurationValid, ttl: -1 };
+    (oidc as any).cachedConfig = mockConfig;
+    (client.fetchUserInfo as jest.Mock).mockResolvedValue({
+        preferred_username: 'daniel',
+    });
+
+    const user = await oidc.getUserFromAccessToken('token');
+    expect(user.username).toBe('daniel');
 });
 
 test('getUserFromAccessToken should return user with email', async () => {
