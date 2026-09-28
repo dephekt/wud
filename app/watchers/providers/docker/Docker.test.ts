@@ -1943,6 +1943,29 @@ describe('Docker Watcher', () => {
             expect(result).toBeDefined();
         });
 
+        test('should inspect the running image rather than the tag', async () => {
+            await docker.register('watcher', 'docker', 'test', {});
+            const container = {
+                Id: '123',
+                Image: 'ghcr.io/org/app:edge',
+                ImageID: 'sha256:running',
+                Names: ['/test-container'],
+                State: 'running',
+                Labels: {},
+            };
+            mockImage.inspect.mockResolvedValue({
+                Id: 'sha256:running',
+                RepoDigests: ['ghcr.io/org/app@sha256:old'],
+            });
+            registry.getState.mockReturnValue({ registry: {} });
+
+            await docker.addImageDetailsToContainer(container);
+
+            expect(mockDockerApi.getImage).toHaveBeenCalledWith(
+                'sha256:running',
+            );
+        });
+
         test('should handle container with implicit docker hub image (no domain)', async () => {
             await docker.register('watcher', 'docker', 'test', {});
             const container = {

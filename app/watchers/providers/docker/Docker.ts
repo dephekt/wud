@@ -957,8 +957,11 @@ export class Docker extends Watcher {
             return containerInStore;
         }
 
-        // Get container image details
-        const image = await this.dockerApi.getImage(container.Image).inspect();
+        // Inspect the image the container runs, not whatever its tag points
+        // at locally now: a pull for another container may have moved the tag.
+        const image = await this.dockerApi
+            .getImage(container.ImageID ?? container.Image)
+            .inspect();
 
         // Get useful properties
         const containerName = getContainerName(container);
