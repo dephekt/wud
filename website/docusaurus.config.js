@@ -8,6 +8,12 @@ import { themes as prismThemes } from 'prism-react-renderer';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
+// Forks build the site for their own GitHub Pages; see the build-docs CI job.
+const siteUrl = process.env.DOCS_URL ?? 'https://getwud.app';
+const baseUrl = process.env.DOCS_BASE_URL ?? '/';
+const githubOrg = process.env.DOCS_ORG ?? 'getwud';
+const githubRepo = `https://github.com/${githubOrg}/wud`;
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'WUD',
@@ -21,7 +27,7 @@ const config = {
       attributes: {
         rel: 'icon',
         type: 'image/svg+xml',
-        href: '/wud/img/wud-logo.svg',
+        href: `${baseUrl}img/wud-logo.svg`,
       },
     },
   ],
@@ -32,12 +38,12 @@ const config = {
   },
 
   // Set the production url of your site here
-  url: 'https://getwud.app',
+  url: siteUrl,
   // Set the /<baseUrl>/ pathname under which your site is served
-  baseUrl: '/',
+  baseUrl,
 
   // GitHub pages deployment config.
-  organizationName: 'getwud',
+  organizationName: githubOrg,
   projectName: 'wud',
 
   onBrokenLinks: 'warn',
@@ -58,7 +64,7 @@ const config = {
         docs: {
           sidebarPath: './sidebars.ts',
           docItemComponent: '@theme/ApiItem',
-          editUrl: 'https://github.com/getwud/wud/tree/main/website/',
+          editUrl: `${githubRepo}/tree/main/website/`,
           versions: {
             current: {
               label: 'Next 🚧',
@@ -87,7 +93,7 @@ const config = {
           wud: {
             specPath: '../app/api/openapi.yaml',
             outputDir: 'docs/api/reference',
-            downloadUrl: '/wud/openapi.yaml',
+            downloadUrl: `${baseUrl}openapi.yaml`,
             sidebarOptions: {
               groupPathsBy: 'tag',
               categoryLinkSource: 'tag',
@@ -201,7 +207,7 @@ const config = {
             position: 'right',
           },
           {
-            href: 'https://github.com/getwud/wud',
+            href: githubRepo,
             position: 'right',
             className: 'header-github-link',
             'aria-label': 'GitHub repository',
@@ -233,7 +239,7 @@ const config = {
             items: [
               {
                 label: 'GitHub',
-                href: 'https://github.com/getwud/wud',
+                href: githubRepo,
               },
               {
                 label: '💖 Sponsor',
@@ -241,7 +247,7 @@ const config = {
               },
               {
                 label: 'Discussions',
-                href: 'https://github.com/getwud/wud/discussions',
+                href: `${githubRepo}/discussions`,
               },
             ],
           },
